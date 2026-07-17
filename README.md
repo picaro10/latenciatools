@@ -65,7 +65,7 @@ Host dependencies (`curl wget git unzip tar file jq`) and build toolchains (Go, 
 ## Installation
 
 ```bash
-git clone https://github.com/<your-user>/latenciatools.git
+git clone https://github.com/picaro10/latenciatools.git
 cd latenciatools
 chmod +x latenciatools.sh
 ./latenciatools.sh
