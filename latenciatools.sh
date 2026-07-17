@@ -25,6 +25,10 @@ CYAN='\033[0;36m'
 WHITE='\033[1;37m'
 NC='\033[0m'
 
+# ─── Version / runtime flags ──────────────────────────────────────────────────
+VERSION="2.1.3-beta"
+DRY_RUN=0                                   # set by --dry-run: describe, never mutate
+
 # ─── Paths ────────────────────────────────────────────────────────────────────
 TOOLS_DIR="$HOME/LatenciaTools"
 VENV_DIR="$TOOLS_DIR/.venv"                 # shared venv for python *libraries*
@@ -70,6 +74,16 @@ _manual() { echo -e "  ${WHITE}$*${NC}"; }
 
 log()           { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"; }
 check_command() { command -v "$1" &>/dev/null; }
+
+# --dry-run guard for batch installers. In dry-run mode it prints what *would*
+# be installed and returns 0 (caller should `&& return`); otherwise returns 1
+# so the real install path runs. $1 = "via" label, rest = items.
+_dry_skip() {
+    [[ "$DRY_RUN" == "1" ]] || return 1
+    local via="$1"; shift
+    echo -e "  ${YELLOW}[dry-run]${NC} via ${via}: would install ${*:-<nothing>}"
+    return 0
+}
 ASSUME_YES=0
 confirm_action() {
     [[ "${ASSUME_YES:-0}" == "1" ]] && return 0
@@ -122,6 +136,7 @@ _ensure_legacy_python() {
 # $1 category ; rest = specs (name | name::pipspec, pipspec may be git+URL)
 _pipx_legacy() {
     local category="$1"; shift
+    _dry_skip "pipx-legacy ($category)" "$@" && return
     _ensure_pipx || { _err "pipx unavailable"; return; }
     _ensure_legacy_python || { _warn "No legacy Python (3.11/3.12) available — skipping ${category}"; return; }
     _ensure_build_deps
@@ -156,6 +171,7 @@ _ensure_gem() {
 # gem batch — Ruby tools (user-install, no root).
 _gem() {
     local category="$1"; shift
+    _dry_skip "gem ($category)" "$@" && return
     _ensure_gem || { _err "gem unavailable — skipping ${category} ruby tools"; return; }
     _info "gem · ${category}"; echo ""
     for g in "$@"; do
@@ -185,6 +201,7 @@ _ensure_venv() {
 # DNF batch — only real Fedora / RPM Fusion package names go here.
 _dnf() {
     local category="$1"; shift
+    _dry_skip "dnf ($category)" "$@" && return
     local pkgs=("$@") installed=0 failed=0 skipped=0 name
     _info "DNF · ${category} (${#pkgs[@]} pkgs)"; echo ""
     for name in "${pkgs[@]}"; do
@@ -205,6 +222,7 @@ _dnf() {
 # pipx batch — standalone Python CLI apps (isolated envs, no PEP668 problems).
 _pipx() {
     local category="$1"; shift
+    _dry_skip "pipx ($category)" "$@" && return
     _ensure_pipx || { _err "pipx unavailable — skipping ${category} python apps"; return; }
     _info "pipx · ${category}"; echo ""
     local spec name
@@ -224,6 +242,7 @@ _pipx() {
 # venv/pip batch — Python *libraries* you import (pwntools, angr, capstone…).
 _pylib() {
     local category="$1"; shift
+    _dry_skip "venv/pip ($category)" "$@" && return
     _ensure_venv || { _err "venv unavailable — skipping ${category} libs"; return; }
     _ensure_build_deps    # unicorn/keystone/filebytes compile wheels → need gcc/cmake
     _info "venv · ${category}  (import via: source $VENV_DIR/bin/activate)"; echo ""
@@ -252,6 +271,7 @@ _go_binname() {
 
 _go() {
     local category="$1"; shift
+    _dry_skip "go install ($category)" "$@" && return
     _ensure_go || { _err "Go unavailable — skipping ${category} go tools"; return; }
     _info "go install · ${category}"; echo ""
     local mod bin
@@ -270,6 +290,7 @@ _go() {
 # git clone/pull helper
 _clone_tool() {
     local name="$1" url="$2" dest="$TOOLS_DIR/$1"
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would git clone ${name} ← ${url}"; return; }
     if [[ -d "$dest/.git" ]]; then
         _info "Updating: $name"
         git -C "$dest" pull --ff-only --quiet 2>>"$LOG_FILE" && _ok "$name source updated." || _warn "$name pull skipped."
@@ -282,6 +303,8 @@ _clone_tool() {
 # Hardened download: fails on HTTP errors, retries, rejects HTML error pages.
 _download() {
     local url="$1" dest="$2" mt
+    # Defense-in-depth: never fetch/write in dry-run (callers are already guarded).
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would download: ${url}"; return 1; }
     curl -fL --retry 3 --connect-timeout 15 -o "$dest" "$url" 2>>"$LOG_FILE" \
         || { _err "download failed (HTTP error): $url"; return 1; }
     mt=$(file -b --mime-type "$dest" 2>/dev/null || echo "")
@@ -318,6 +341,7 @@ _gh_latest_asset() {
 # The asset may be a raw binary (no extension), a .zip, or a .tar.*.
 _release_bin() {
     local repo="$1" bin="$2" pat="$3"
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would fetch release binary ${bin} from ${repo}"; return; }
     check_command "$bin" && { _warn "$bin already installed."; return; }
     local url; url=$(_gh_latest_asset "$repo" "$pat") \
         || { _warn "$bin: GitHub API error — install manually from https://github.com/$repo/releases"; return; }
@@ -356,6 +380,7 @@ _release_bin() {
 # Full-archive app installer (for tools that need their sibling files, e.g. gophish
 # needs static/ templates/ config.json next to the binary).
 install_gophish() {
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would download the gophish release package and add a wrapper"; return; }
     check_command gophish && { _warn "gophish already installed."; return; }
     local url; url=$(_gh_latest_asset "gophish/gophish" 'linux-64bit\.zip$') \
         || { _warn "gophish: GitHub API error — install manually."; return; }
@@ -384,6 +409,7 @@ EOF
 
 # bettercap: Go build needs C libs (libpcap/libusb/libnetfilter_queue).
 install_bettercap() {
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would install bettercap build deps and go-build bettercap"; return; }
     check_command bettercap && { _warn "bettercap already installed."; return; }
     _ensure_go || { _err "Go unavailable — skipping bettercap"; return; }
     _info "Installing bettercap build deps…"
@@ -397,6 +423,7 @@ install_bettercap() {
 
 # sqlmap: not packaged in Fedora → clone + wrapper (it's a python app run in place).
 install_sqlmap() {
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would clone sqlmap and add a ~/.local/bin wrapper"; return; }
     check_command sqlmap && { _warn "sqlmap already installed."; return; }
     _clone_tool "sqlmap" "https://github.com/sqlmapproject/sqlmap.git"
     if [[ -f "$TOOLS_DIR/sqlmap/sqlmap.py" ]]; then
@@ -408,6 +435,7 @@ install_sqlmap() {
 
 # nikto: Perl app, not in Fedora → clone + wrapper to program/nikto.pl.
 install_nikto() {
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would clone nikto and add a ~/.local/bin wrapper"; return; }
     check_command nikto && { _warn "nikto already installed."; return; }
     _clone_tool "nikto" "https://github.com/sullo/nikto.git"
     if [[ -f "$TOOLS_DIR/nikto/program/nikto.pl" ]]; then
@@ -420,6 +448,7 @@ install_nikto() {
 # ─── Repository setup ─────────────────────────────────────────────────────────
 setup_repos() {
     _header "Setting Up Repositories"
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would enable RPM Fusion (free + non-free) and run 'dnf makecache'"; return; }
     if ! rpm -q rpmfusion-free-release &>/dev/null; then
         run_with_spinner "RPM Fusion Free" sudo dnf install -y \
             "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${FEDORA_VER}.noarch.rpm" \
@@ -491,7 +520,9 @@ cat_web_application() {
     _clone_tool "ParamSpider" "https://github.com/devanshbatham/ParamSpider.git"
     _clone_tool "XSStrike"    "https://github.com/s0md3v/XSStrike.git"
     echo ""; _info "Burp Suite CE: ${WHITE}https://portswigger.net/burp/communitydownload${NC}"
-    if confirm_action "Install OWASP ZAP via Flatpak now?"; then
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo -e "  ${YELLOW}[dry-run]${NC} would offer OWASP ZAP via Flatpak (flathub org.zaproxy.ZAP)"
+    elif confirm_action "Install OWASP ZAP via Flatpak now?"; then
         flatpak install -y flathub org.zaproxy.ZAP 2>&1 | tee -a "$LOG_FILE" \
             && _ok "ZAP installed." || _err "ZAP install failed."
     fi
@@ -537,19 +568,24 @@ cat_password_attacks() {
     _pipx "Password Attacks" hashid name-that-hash
     _info "crunch/fcrackzip no están en Fedora → 'sudo dnf copr enable' o build. Genera wordlists con hashcat --stdout o maskprocessor."
     # rockyou (Fedora, a diferencia de Kali, no lo trae)
-    if [[ ! -f /usr/share/wordlists/rockyou.txt ]]; then
-        _info "Downloading rockyou.txt…"
-        local rk; rk="$(mktemp)"
-        if _download "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt" "$rk"; then
-            sudo mkdir -p /usr/share/wordlists
-            sudo mv "$rk" /usr/share/wordlists/rockyou.txt && _ok "rockyou.txt → /usr/share/wordlists/"
-        else
-            rm -f "$rk"; _warn "rockyou download failed."
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo -e "  ${YELLOW}[dry-run]${NC} would download rockyou.txt → /usr/share/wordlists/ (needs sudo)"
+        echo -e "  ${YELLOW}[dry-run]${NC} would offer SecLists clone (~1 GB) → $TOOLS_DIR/SecLists"
+    else
+        if [[ ! -f /usr/share/wordlists/rockyou.txt ]]; then
+            _info "Downloading rockyou.txt…"
+            local rk; rk="$(mktemp)"
+            if _download "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt" "$rk"; then
+                sudo mkdir -p /usr/share/wordlists
+                sudo mv "$rk" /usr/share/wordlists/rockyou.txt && _ok "rockyou.txt → /usr/share/wordlists/"
+            else
+                rm -f "$rk"; _warn "rockyou download failed."
+            fi
+        else _warn "rockyou.txt already present."; fi
+        if [[ ! -d "$TOOLS_DIR/SecLists" ]] && confirm_action "Clone SecLists (~1 GB)?"; then
+            git clone --depth=1 "https://github.com/danielmiessler/SecLists.git" \
+                "$TOOLS_DIR/SecLists" 2>&1 | tee -a "$LOG_FILE" && _ok "SecLists cloned."
         fi
-    else _warn "rockyou.txt already present."; fi
-    if [[ ! -d "$TOOLS_DIR/SecLists" ]] && confirm_action "Clone SecLists (~1 GB)?"; then
-        git clone --depth=1 "https://github.com/danielmiessler/SecLists.git" \
-            "$TOOLS_DIR/SecLists" 2>&1 | tee -a "$LOG_FILE" && _ok "SecLists cloned."
     fi
 }
 
@@ -671,7 +707,9 @@ cat_cloud_containers() {
     _release_bin "gitleaks/gitleaks" "gitleaks" 'linux_x64\.tar\.gz$'
     _go  "Cloud & Containers" github.com/aquasecurity/kube-bench@latest
     # kubectl / helm / trivy: repos propios
-    if confirm_action "Add kubectl + Trivy vendor repos and install?"; then
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo -e "  ${YELLOW}[dry-run]${NC} would write /etc/yum.repos.d/{kubernetes,trivy}.repo (gpgcheck=1) and install kubectl trivy"
+    elif confirm_action "Add kubectl + Trivy vendor repos and install?"; then
         _info "Adding Kubernetes repo…"
         sudo tee /etc/yum.repos.d/kubernetes.repo >/dev/null <<'EOF'
 [kubernetes]
@@ -705,7 +743,9 @@ cat_anonymity() {
         perl-Image-ExifTool scrub cryptsetup gnupg2 kleopatra
     _info "VeraCrypt (RPM oficial): ${WHITE}https://www.veracrypt.fr/en/Downloads.html${NC}"
     _info "secure-delete no está en Fedora; alternativa: ${WHITE}shred${NC} (coreutils) o ${WHITE}scrub${NC}."
-    if confirm_action "Install OnionShare via Flatpak?"; then
+    if [[ "$DRY_RUN" == "1" ]]; then
+        echo -e "  ${YELLOW}[dry-run]${NC} would offer OnionShare via Flatpak (flathub org.onionshare.OnionShare)"
+    elif confirm_action "Install OnionShare via Flatpak?"; then
         flatpak install -y flathub org.onionshare.OnionShare 2>&1 | tee -a "$LOG_FILE" \
             && _ok "OnionShare installed." || _warn "OnionShare failed."
     fi
@@ -715,6 +755,7 @@ cat_anonymity() {
 # SPECIAL INSTALLERS
 # =============================================================================
 install_metasploit() {
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would download Rapid7's msfupdate installer and run it as root"; return; }
     check_command msfconsole && { _warn "Metasploit already installed."; return; }
     _info "Metasploit no está en repos de Fedora — installer oficial de Rapid7…"
     confirm_action "Download and run Rapid7's official installer as root?" \
@@ -731,6 +772,7 @@ install_metasploit() {
 }
 
 install_ghidra() {
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would download the latest Ghidra release and unpack it"; return; }
     { check_command ghidra || [[ -d "$TOOLS_DIR/ghidra" ]]; } && { _warn "Ghidra already present."; return; }
     _info "Downloading latest Ghidra…"
     local url; url=$(_gh_latest_asset "NationalSecurityAgency/ghidra" '_PUBLIC_.*\.zip$') \
@@ -745,6 +787,7 @@ install_ghidra() {
 }
 
 install_jadx() {
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would download the latest jadx release and link it into ~/.local/bin"; return; }
     check_command jadx && { _warn "jadx already installed."; return; }
     local url; url=$(_gh_latest_asset "skylot/jadx" 'jadx-[0-9].*\.zip$') \
         || { _warn "jadx: GitHub API error."; return; }
@@ -789,6 +832,7 @@ install_all() {
 # ─── Update everything ────────────────────────────────────────────────────────
 update_tools() {
     _header "Updating All Tools"
+    [[ "$DRY_RUN" == "1" ]] && { echo -e "  ${YELLOW}[dry-run]${NC} would run: dnf upgrade, pipx upgrade-all, venv pip upgrades, and 'git pull' on cloned tools"; return; }
     run_with_spinner "DNF upgrade" sudo dnf upgrade -y && _ok "DNF updated." || _warn "DNF upgrade had issues."
     if check_command pipx; then
         _info "Upgrading pipx apps…"
@@ -876,8 +920,9 @@ show_menu() {
              ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝╚══════╝
 BANNER
     echo -e "${NC}"
-    echo -e "  ${WHITE}Security Toolkit for Fedora ${FEDORA_VER}${NC}  ${CYAN}· v2.1.3-beta · by LatenciaTech${NC}"
+    echo -e "  ${WHITE}Security Toolkit for Fedora ${FEDORA_VER}${NC}  ${CYAN}· v${VERSION} · by LatenciaTech${NC}"
     echo -e "  ${YELLOW}⚠  FOR LEGAL USE ONLY — authorised pentest / CTF / research  ⚠${NC}"
+    [[ "$DRY_RUN" == "1" ]] && echo -e "  ${YELLOW}◆  DRY-RUN MODE — nothing will be installed or changed  ◆${NC}"
     echo -e "  ${CYAN}  Tools: $TOOLS_DIR   |   Log: $LOG_FILE${NC}\n"
     echo "  ════════════════════════════════════════════════════════"
     echo "  Categories (Kali menu order)"
@@ -899,8 +944,52 @@ BANNER
 }
 
 # =============================================================================
+# CLI (parsed before any privileged action)
+# =============================================================================
+show_version() { echo "LatenciaTools ${VERSION}"; }
+
+show_help() {
+    cat <<EOF
+LatenciaTools ${VERSION} — Security Toolkit Installer for Fedora
+
+Usage: ./latenciatools.sh [OPTIONS]
+
+Options:
+  -h, --help       Show this help and exit
+  -V, --version    Show version and exit
+  -n, --dry-run    Preview mode: describe what each action WOULD install or
+                   change, without touching the system. No downloads, no dnf,
+                   no sudo mutations, no git clones. Covers the dnf/pipx/go/gem/
+                   venv batches, git clones, release downloads, repo setup and
+                   every special installer (incl. the Metasploit-as-root step).
+
+With no options, launches the interactive menu.
+
+Examples:
+  ./latenciatools.sh                 # interactive menu (installs for real)
+  ./latenciatools.sh --dry-run       # same menu, but previews only
+  ./latenciatools.sh --version
+
+FOR LEGAL USE ONLY — authorised pentest / CTF / security research.
+Project: https://github.com/picaro10/latenciatools
+EOF
+}
+
+# =============================================================================
 # BOOTSTRAP
 # =============================================================================
+# --- Parse CLI first: --help/--version must work on any OS, even as root ------
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)    show_help;    exit 0 ;;
+        -V|--version) show_version; exit 0 ;;
+        -n|--dry-run) DRY_RUN=1; shift ;;
+        --)           shift; break ;;
+        -*)           _err "Unknown option: $1 (try --help)"; exit 2 ;;
+        *)            _err "Unexpected argument: $1 (try --help)"; exit 2 ;;
+    esac
+done
+
 if [[ $EUID -eq 0 ]]; then
     echo -e "${RED}  ✗ Do NOT run as root!${NC}"
     echo -e "${YELLOW}  Run as a regular user — the script uses sudo when needed.${NC}"
@@ -922,8 +1011,12 @@ fi
 # ─── Preflight: required host tools (fail hard if any can't be installed) ──────
 for dep in curl wget git unzip tar file jq; do
     if ! check_command "$dep"; then
-        sudo dnf install -y "$dep" >>"$LOG_FILE" 2>&1 || {
-            _err "Required dependency could not be installed: $dep"; exit 1; }
+        if [[ "$DRY_RUN" == "1" ]]; then
+            _warn "[dry-run] missing dependency '$dep' (would 'sudo dnf install -y $dep')"
+        else
+            sudo dnf install -y "$dep" >>"$LOG_FILE" 2>&1 || {
+                _err "Required dependency could not be installed: $dep"; exit 1; }
+        fi
     fi
 done
 
@@ -932,8 +1025,11 @@ mkdir -p "$HOME/.local/bin" "$TOOLS_DIR"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH";; esac
 case ":$PATH:" in *":$HOME/go/bin:"*) ;; *) export PATH="$HOME/go/bin:$PATH";; esac
 
-sudo -v
-_sudo_keepalive
+# In dry-run we never mutate the system, so don't prime sudo or keep it alive.
+if [[ "$DRY_RUN" != "1" ]]; then
+    sudo -v
+    _sudo_keepalive
+fi
 
 { echo ""; echo "==> LatenciaTools Fedora Installer — $(date)"; echo ""; } | tee -a "$LOG_FILE"
 
