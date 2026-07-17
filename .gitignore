@@ -1,0 +1,14 @@
+# LatenciaTools runtime artefacts
+latenciatools_log_*.txt
+*.log
+
+# Tools install dir (created at $HOME/LatenciaTools by the script) — never commit
+LatenciaTools/
+.venv/
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
