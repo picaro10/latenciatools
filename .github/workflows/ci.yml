@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    name: Shell lint, syntax & CLI smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Hard gates: these must pass to merge -----------------------------
+      - name: Syntax check (bash -n)
+        run: bash -n latenciatools.sh
+
+      - name: Install ShellCheck v0.11.0
+        run: |
+          set -euo pipefail
+          ver=0.11.0
+          url="https://github.com/koalaman/shellcheck/releases/download/v${ver}/shellcheck-v${ver}.linux.x86_64.tar.xz"
+          curl -fsSL "$url" -o sc.tar.xz
+          tar -xJf sc.tar.xz
+          sudo install -m755 "shellcheck-v${ver}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: ShellCheck (severity=warning — matches the README "shellcheck-clean" claim)
+        run: shellcheck --severity=warning latenciatools.sh
+
+      - name: CLI smoke (parses and exits cleanly, installs nothing)
+        run: |
+          set -euo pipefail
+          bash latenciatools.sh --version
+          bash latenciatools.sh --help >/dev/null
+          rc=0; bash latenciatools.sh --bogus || rc=$?
+          test "$rc" -eq 2 || { echo "expected --bogus to exit 2, got $rc"; exit 1; }
+
+      # --- Advisory: reported, but does NOT block the merge yet -------------
+      # The script uses hand-aligned formatting that shfmt would rewrite.
+      # Kept non-blocking until the source is reflowed to shfmt style.
+      - name: shfmt diff (advisory)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/mvdan/sh/releases/download/v3.8.0/shfmt_v3.8.0_linux_amd64 -o /tmp/shfmt
+          chmod +x /tmp/shfmt
+          /tmp/shfmt -d -i 4 -ci latenciatools.sh
